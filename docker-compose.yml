@@ -1,0 +1,98 @@
+name: aq-collector
+
+x-collector: &collector
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  volumes:
+    - aq-data:/data/aq
+  healthcheck:
+    test:
+      - CMD
+      - python
+      - -c
+      - >-
+        import urllib.request,sys;
+        sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status==200 else 1)
+    interval: 5s
+    timeout: 3s
+    retries: 20
+    start_period: 10s
+
+services:
+  # Two API/collector instances. They share the SQLite coordination DB and
+  # together honour "at most 2 in-flight requests per source".
+  collector-1:
+    <<: *collector
+    container_name: aq-collector-1
+    environment:
+      AQ_DB_PATH: /data/aq/aq.sqlite3
+      AQ_INSTANCE_ID: collector-1
+      AQ_HTTP_TIMEOUT_SECONDS: "6"
+      AQ_LEASE_SECONDS: "8"
+      AQ_POLL_SECONDS: "0.2"
+      AQ_LOG_LEVEL: info
+    ports:
+      - "8001:8000"
+
+  collector-2:
+    <<: *collector
+    container_name: aq-collector-2
+    environment:
+      AQ_DB_PATH: /data/aq/aq.sqlite3
+      AQ_INSTANCE_ID: collector-2
+      AQ_HTTP_TIMEOUT_SECONDS: "6"
+      AQ_LEASE_SECONDS: "8"
+      AQ_POLL_SECONDS: "0.2"
+      AQ_LOG_LEVEL: info
+    ports:
+      - "8002:8000"
+    depends_on:
+      collector-1:
+        condition: service_started
+
+  # Two independently configurable provincial-station simulators.
+  # station-a: slow (2 s) and injects a 429 every 4th request with Retry-After: 3
+  station-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.station
+    container_name: aq-station-a
+    restart: unless-stopped
+    environment:
+      STATION_NAME: station-a
+      STATION_PORT: "9001"
+      STATION_DELAY_SECONDS: "2"
+      STATION_429_EVERY: "4"
+      STATION_RETRY_AFTER_SECONDS: "3"
+      STATION_LOG_PATH: /data/station-a/requests.jsonl
+    ports:
+      - "9001:9001"
+    volumes:
+      - station-a-data:/data/station-a
+
+  # station-b: fast, no 429 — used to prove a slow/cooling station does not
+  # block another source or progress queries.
+  station-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.station
+    container_name: aq-station-b
+    restart: unless-stopped
+    environment:
+      STATION_NAME: station-b
+      STATION_PORT: "9002"
+      STATION_DELAY_SECONDS: "0.2"
+      STATION_429_EVERY: "0"
+      STATION_RETRY_AFTER_SECONDS: "2"
+      STATION_LOG_PATH: /data/station-b/requests.jsonl
+    ports:
+      - "9002:9002"
+    volumes:
+      - station-b-data:/data/station-b
+
+volumes:
+  aq-data:
+  station-a-data:
+  station-b-data:
